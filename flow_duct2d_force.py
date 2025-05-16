@@ -6,6 +6,7 @@ from IPython.display import clear_output
 from pymrm import interp_stagg_to_cntr, interp_cntr_to_stagg, interp_cntr_to_stagg_tvd
 from pymrm import construct_grad, construct_div, minmod
 from pyamg.aggregation import smoothed_aggregation_solver as amg
+from centered_bc import compute_centered_bc, apply_centered_bc
 
 # a duct with L = 20, H = 1
 
@@ -57,6 +58,7 @@ mu_v      = [None] * dim  # noqa: E221
 rho_v     = [None] * dim  # noqa: E221
 beta_v    = [None] * dim  # noqa: E221
 prefac_p  = [None] * dim  # noqa: E221
+bc_v_pre  = []
 p         = p_out * np.ones(shape_p)  # noqa: E221         # initial guess pressure
 mu_p      = np.full_like(p, fill_value=mu)  # noqa: E221 # scalar field with viscosity
 rho_p     = np.full_like(p, fill_value=rho)   # noqa: E221 # scalar field with density
@@ -81,18 +83,34 @@ for i in range(dim):
         bc_v[i][j] = ({'a': 0, 'b': 1, 'd': 0}, {'a': 0, 'b': 1, 'd': 0})
     shape_v[i][i] -= 1
 
+# WEST/EAST BC
+bc_v[dim_u][0] = ({'a': 0, 'b': 1, 'd': u_in}, {'a': 1, 'b': 0, 'd': 0.})
+bc_v[dim_v][0] = ({'a': 0, 'b': 1, 'd': v_in}, {'a': 1, 'b': 0, 'd': 0.})
+bc_p[0] = ({'a': 1, 'b': 0, 'd': 0}, {'a': 0, 'b': 1, 'd': 0})
+
+bc_p_pre = compute_centered_bc(c=p, bc=bc_p[0][1], axis=0, boundary=1)
+bc_v_pre[dim_u].append(compute_centered_bc(c=v[dim_u], bc=bc_v[dim_u][0], axis=0, boundary=0))
+bc_v_pre[dim_u].append(compute_centered_bc(c=v[dim_u], bc=bc_v[dim_u][1], axis=0, boundary=1))
+
+# SOUTH/NORTH BC
+bc_v[dim_u][1] = ({'a': 1, 'b': 0, 'd': 0.}, {'a': 1, 'b': 0, 'd': 0.})
+bc_v[dim_v][1] = ({'a': 0, 'b': 1, 'd': 0}, {'a': 0, 'b': 1, 'd': 0.})
+bc_p[1] = ({'a': 1, 'b': 0, 'd': 0}, {'a': 1, 'b': 0, 'd': 0})
+bc_v_pre[dim_v].append(compute_centered_bc(c=v[dim_v], bc=bc_v[dim_v][0], axis=1, boundary=0))
+bc_v_pre[dim_v].append(compute_centered_bc(c=v[dim_v], bc=bc_v[dim_v][1], axis=1, boundary=1))
+
 # Boundary condition at the inlet
-bc_v[dim_u][0] = ({'a': 0, 'b': 1, 'd': u_in}, {'a': 1, 'b': 0, 'd': 0.})   # inlet and outlet velocity bc in x-direction for x-momentum # noqa: E501
+# bc_v[dim_u][0] = ({'a': 0, 'b': 1, 'd': u_in}, {'a': 1, 'b': 0, 'd': 0.})   # inlet and outlet velocity bc in x-direction for x-momentum # noqa: E501
 
-bc_v[dim_v][0] = ({'a': 0, 'b': 1, 'd': v_in}, {'a': 1, 'b': 0, 'd': 0.})   # inlet and outlet velocity bc in x-direction for y-momentum # noqa: E501
+# bc_v[dim_v][0] = ({'a': 0, 'b': 1, 'd': v_in}, {'a': 1, 'b': 0, 'd': 0.})   # inlet and outlet velocity bc in x-direction for y-momentum # noqa: E501
 
-# for the pressure, a prescribed boundary condition has to be implemented
-lapl_bc_p_prescribed_mask = np.zeros(shape=shape_p, dtype=bool)
-lapl_bc_p_prescribed_mask[-1, :] = True    # set all the values to True at the outlet, where the prescribed pressure is applied # noqa: E501
-lapl_bc_p_prescribed_mask = lapl_bc_p_prescribed_mask.reshape(-1)
-# a helper for later, where the main diagonal of the cells affected by the prescribed pressure are set to 1 and all off diagonals to 0 # noqa: E501
-lapl_bc_p_prescribed_manip = sp.sparse.spdiags([(lapl_bc_p_prescribed_mask).astype(float)], [0], format='csr')
-lapl_bc_p_prescribed_manip.eliminate_zeros()    # freeing some memory
+# # for the pressure, a prescribed boundary condition has to be implemented
+# lapl_bc_p_prescribed_mask = np.zeros(shape=shape_p, dtype=bool)
+# lapl_bc_p_prescribed_mask[-1, :] = True    # set all the values to True at the outlet, where the prescribed pressure is applied # noqa: E501
+# lapl_bc_p_prescribed_mask = lapl_bc_p_prescribed_mask.reshape(-1)
+# # a helper for later, where the main diagonal of the cells affected by the prescribed pressure are set to 1 and all off diagonals to 0 # noqa: E501
+# lapl_bc_p_prescribed_manip = sp.sparse.spdiags([(lapl_bc_p_prescribed_mask).astype(float)], [0], format='csr')
+# lapl_bc_p_prescribed_manip.eliminate_zeros()    # freeing some memory
 
 
 # Preparation of the operators
@@ -127,10 +145,11 @@ for i in range(dim):
     Jac_v_pc[i] = sla.LinearOperator(Jac_v_ilu[i].shape, lambda x: Jac_v_ilu[i].solve(x))
 
 # enforce the prescribed boundary condition
-Lapl_p = Lapl_p.tolil()                     # need to convert to lil here for efficiency, otherwise we are directly manipulating the sparse matrix structure, which is expensive! # noqa: E501
-Lapl_p[lapl_bc_p_prescribed_mask, :] = 0   # setting the complete rows with prescribed pressure to 0
-Lapl_p += lapl_bc_p_prescribed_manip        # setting the main diagonal of the affected rows to 1
-Lapl_p = sp.sparse.csr_matrix(Lapl_p)
+Lapl_p = apply_centered_bc(c=p, bc=bc_p, bc_param=bc_p_pre, A=Lapl_p)
+# Lapl_p = Lapl_p.tolil()                     # need to convert to lil here for efficiency, otherwise we are directly manipulating the sparse matrix structure, which is expensive! # noqa: E501
+# Lapl_p[lapl_bc_p_prescribed_mask, :] = 0   # setting the complete rows with prescribed pressure to 0
+# Lapl_p += lapl_bc_p_prescribed_manip        # setting the main diagonal of the affected rows to 1
+# Lapl_p = sp.sparse.csr_matrix(Lapl_p)
 Lapl_p_M = amg(Lapl_p).aspreconditioner(cycle='V')
 
 X, Y = np.meshgrid(x_cntr_c[0], x_cntr_c[1])
@@ -175,19 +194,20 @@ for k in range(num_time_steps):
         # dv = Jac_lu.solve(g_v[i])
         v[i] -= dv.reshape(shape_v[i])
 
-        shape_v_bnd = list(v[i].shape)
-        shape_v_bnd[i] = 1
-        if i == dim_u:
-            v_incl_bc = np.concatenate((np.full(shape_v_bnd, fill_value=u_in), v[i], v[i][-1, :].reshape(shape_v_bnd)), axis=i)  # noqa: E501
-        else:
-            v_incl_bc = np.concatenate((np.zeros(shape_v_bnd), v[i], np.zeros(shape_v_bnd)), axis=i)  # velocity field with enforced wall velocity  # noqa: E501
-        v_cntr[i] = interp_stagg_to_cntr(v_incl_bc, x_cntr_f[i], x_cntr_c[i], axis=i)               # for outputting
-        div_v += Div_p[i] @ v_incl_bc.reshape(-1, 1)                                                # add contribution to defect  # noqa: E501
+        # shape_v_bnd = list(v[i].shape)
+        # shape_v_bnd[i] = 1
+        # if i == dim_u:
+        #     v_incl_bc = np.concatenate((np.full(shape_v_bnd, fill_value=u_in), v[i], v[i][-1, :].reshape(shape_v_bnd)), axis=i)  # noqa: E501
+        # else:
+        #     v_incl_bc = np.concatenate((np.zeros(shape_v_bnd), v[i], np.zeros(shape_v_bnd)), axis=i)  # velocity field with enforced wall velocity  # noqa: E501
+        v_cntr[i] = interp_stagg_to_cntr(v[i], x_cntr_f[i], x_cntr_c[i], axis=i)               # for outputting
+        div_v += Div_p[i] @ v[i].reshape(-1, 1)                                                # add contribution to defect  # noqa: E501
 
     # Apply Implicit Force Term
-    defect_continuity = -div_v
-    defect_continuity[lapl_bc_p_prescribed_mask] = 0    # set defect to 0 for prescribed boundary
-    dp, exit_code = sla.bicgstab(A=Lapl_p, b=defect_continuity, M=Lapl_p_M, rtol=rtol)
+    # defect_continuity = div_v
+    defect_continuity = apply_centered_bc(c=p, bc=bc_p, bc_param=bc_p_pre, B=div_v)
+    # defect_continuity[lapl_bc_p_prescribed_mask] = 0    # set defect to 0 for prescribed boundary
+    dp, exit_code = sla.bicgstab(A=Lapl_p, b=-defect_continuity, M=Lapl_p_M, rtol=rtol)
     p += dp.reshape(shape_p)                            # update pressure
     # update velocities
     div_v.fill(0)
@@ -196,21 +216,21 @@ for k in range(num_time_steps):
         shape_p_f[i] = shape_p[i]+1
         grad_dp = (Grad_p[i] @ dp.reshape(-1, 1)).reshape(shape_p_f)
         idx = [slice(None)] * dim
-        idx[i] = slice(1, shape_p_f[i]-1)
+        idx[i] = slice(0, shape_p_f[i])
         v[i] = prefac_p[i][tuple(idx)] * (v[i] - (dt/rho_v[i][tuple(idx)]) * grad_dp[tuple(idx)])
         shape_v_bnd = list(v[i].shape)
         shape_v_bnd[i] = 1
-        if i == dim_u:
-            v_incl_bc = np.concatenate((np.full(shape_v_bnd, fill_value=u_in), v[i], v[i][-1, :].reshape(shape_v_bnd)), axis=i)  # noqa: E501
-        else:
-            v_incl_bc = np.concatenate((np.zeros(shape_v_bnd), v[i], np.zeros(shape_v_bnd)), axis=i)  # velocity field with enforced wall velocity  # noqa: E501
-        v_cntr[i] = interp_stagg_to_cntr(v_incl_bc, x_cntr_f[i], x_cntr_c[i], axis=i)
-        div_v += Div_p[i] @ v_incl_bc.reshape(-1, 1)
+        # if i == dim_u:
+        #     v_incl_bc = np.concatenate((np.full(shape_v_bnd, fill_value=u_in), v[i], v[i][-1, :].reshape(shape_v_bnd)), axis=i)  # noqa: E501
+        # else:
+        #     v_incl_bc = np.concatenate((np.zeros(shape_v_bnd), v[i], np.zeros(shape_v_bnd)), axis=i)  # velocity field with enforced wall velocity  # noqa: E501
+        v_cntr[i] = interp_stagg_to_cntr(v[i], x_cntr_f[i], x_cntr_c[i], axis=i)
+        div_v += Div_p[i] @ v[i].reshape(-1, 1)
 
     # Enforce continuity
-    defect_continuity = -div_v
-    defect_continuity[lapl_bc_p_prescribed_mask] = 0    # set defect to 0 for prescribed boundary
-    dp, exit_code = sla.bicgstab(A=Lapl_p, b=defect_continuity, M=Lapl_p_M, rtol=rtol)
+    defect_continuity = apply_centered_bc(c=p, bc=bc_p, bc_param=bc_p_pre, B=div_v)
+    # defect_continuity[lapl_bc_p_prescribed_mask] = 0    # set defect to 0 for prescribed boundary
+    dp, exit_code = sla.bicgstab(A=Lapl_p, b=-defect_continuity, M=Lapl_p_M, rtol=rtol)
     p += dp.reshape(shape_p)                            # update pressure
     # update velocities
     for i in range(dim):
@@ -218,15 +238,15 @@ for k in range(num_time_steps):
         shape_p_f[i] = shape_p[i]+1
         grad_dp = (Grad_p[i] @ dp.reshape(-1, 1)).reshape(shape_p_f)
         idx = [slice(None)] * dim
-        idx[i] = slice(1, shape_p_f[i]-1)
+        idx[i] = slice(0, shape_p_f[i])
         v[i] -= (dt/rho_v[i][tuple(idx)]) * grad_dp[tuple(idx)]
         shape_v_bnd = list(v[i].shape)
         shape_v_bnd[i] = 1
-        if i == dim_u:
-            v_incl_bc = np.concatenate((np.full(shape_v_bnd, fill_value=u_in), v[i], v[i][-1, :].reshape(shape_v_bnd)), axis=i)  # noqa: E501
-        else:
-            v_incl_bc = np.concatenate((np.zeros(shape_v_bnd), v[i], np.zeros(shape_v_bnd)), axis=i)  # velocity field with enforced wall velocity  # noqa: E501
-        v_cntr[i] = interp_stagg_to_cntr(v_incl_bc, x_cntr_f[i], x_cntr_c[i], axis=i)
+        # if i == dim_u:
+        #     v_incl_bc = np.concatenate((np.full(shape_v_bnd, fill_value=u_in), v[i], v[i][-1, :].reshape(shape_v_bnd)), axis=i)  # noqa: E501
+        # else:
+        #     v_incl_bc = np.concatenate((np.zeros(shape_v_bnd), v[i], np.zeros(shape_v_bnd)), axis=i)  # velocity field with enforced wall velocity  # noqa: E501
+        v_cntr[i] = interp_stagg_to_cntr(v[i], x_cntr_f[i], x_cntr_c[i], axis=i)
 
     clear_output(wait=True)
     fig, axes = plt.subplots(1, 2)
