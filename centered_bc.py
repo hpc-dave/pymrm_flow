@@ -22,7 +22,7 @@ def compute_centered_bc(c: np.ndarray,
         0->WEST/SOUTH/BOTTOM boundary, 1->EAST/NORTH/TOP
     format: str
         format of the resulting matrix
-    
+
     Returns
     -------
     dictionary with a sparse matrix and a mask for further processing
@@ -48,7 +48,13 @@ def compute_centered_bc(c: np.ndarray,
     return {'mask': mask_centered, 'diag': diag_centered}
 
 
-def apply_centered_bc(c: np.ndarray, bc: dict, bc_param: dict, A: sp.spmatrix | None = None, B: np.ndarray | None = None, alg: str = 'Jacobian'):
+def apply_centered_bc(c: np.ndarray,
+                      bc: dict,
+                      bc_param: dict,
+                      A: sp.spmatrix | None = None,
+                      B: np.ndarray | None = None,
+                      alg: str = 'Jacobian',
+                      format:str = 'csr'):
     r"""
     Application of centered boundary condition to Matrix and/or RHS
 
@@ -81,7 +87,18 @@ def apply_centered_bc(c: np.ndarray, bc: dict, bc_param: dict, A: sp.spmatrix | 
         A = A.tolil()          # need to convert to lil here for efficiency, otherwise we are directly manipulating the sparse matrix structure, which is expensive! # noqa: E501
         A[mask, :] = 0         # setting the complete rows with prescribed pressure to 0
         A += bc_param['diag']  # setting the main diagonal of the affected rows to 1
-        A = A_type(A)
+        match format:
+            case 'csr':
+                A = sp.csr_matrix(A)
+            case 'csc':
+                A = sp.csc_matrix(A)
+            case 'coo':
+                A = sp.coo_matrix(A)
+            case 'lil':
+                # do nothing
+                A = A
+            case _:
+                raise ValueError(f'Unknown sparse matrix type: {format}')
 
     if B is not None:
         match alg:
@@ -89,6 +106,8 @@ def apply_centered_bc(c: np.ndarray, bc: dict, bc_param: dict, A: sp.spmatrix | 
                 B[mask] = c.ravel()[mask] - bc['d']
             case 'Direct':
                 B[mask] = bc['d']
+            case _:
+                raise ValueError(f'Unknown algorithm type: {alg}')
 
     if A is not None and B is not None:
         return A, B
