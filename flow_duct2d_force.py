@@ -74,7 +74,7 @@ for i in range(dim):
     x_cntr_f[i]  = np.linspace(0, box[i], shape_p[i]+1)     # noqa: E221
     x_cntr_c[i]  = 0.5*(x_cntr_f[i][:-1] + x_cntr_f[i][1:])     # noqa: E221
     x_stagg_c[i] = x_cntr_f[i]
-    x_stagg_f[i] = np.concatenate((-x_cntr_c[i][0:1], x_cntr_c[i], x_cntr_c[i][-1]+x_cntr_c[i][0:1]), axis=0)
+    x_stagg_f[i] = np.concatenate((-1.1*x_cntr_c[i][0:1], x_cntr_c[i], x_cntr_c[i][-1]+x_cntr_c[i][0:1]*2), axis=0)
     bc_v[i] = [None] * dim
     bc_v_pre[i] = [None] * dim
     # shape_v[i][i] -= 1
@@ -147,15 +147,40 @@ for k in range(num_time_steps):
         for j in range(dim):
             if (j == i):        # self-convection
                 v_f = interp_cntr_to_stagg(v[i], x_stagg_f[i], x_stagg_c[i], axis=i)
-                vi_f, dvi_f = interp_cntr_to_stagg_tvd(v[i], x_stagg_f[i], x_stagg_c[i], bc_v[i][j], v_f, minmod, axis=j)   # noqa: E501
+                vi_f, dvi_f = interp_cntr_to_stagg_tvd(v[i], x_f=x_stagg_f[i], x_c=x_stagg_c[i], bc=bc_v[i][j], v=v_f, tvd_limiter=minmod, axis=j)   # noqa: E501
                 conv_flux = rho*vi_f*vi_f
             else:               # regular convection
-                v_f = interp_stagg_to_cntr(v[j], x_cntr_c[i], x_stagg_c[i], axis=i)
-                shape_v_f_bnd = list(v_f.shape)
-                shape_v_f_bnd[j] = 1
-                v_f = np.concatenate((np.zeros(shape_v_f_bnd), v_f, np.zeros(shape_v_f_bnd)), axis=j)
-                vi_f, dvi_f = interp_cntr_to_stagg_tvd(v[i], x_cntr_f[j], x_cntr_c[j], bc_v[i][j], v_f, minmod, axis=j)
-                conv_flux = rho*v_f*vi_f
+                shape_bc_v = list(v[j].shape)
+                shape_bc_v[i] = 1
+                v_f = interp_stagg_to_cntr(v[j], x_f=x_cntr_f[i], axis=i)
+                # append staggered boundary conditions
+                v_f_bc_low = np.zeros(shape_bc_v, dtype=float)
+                v_f_bc_high = np.zeros(shape_bc_v, dtype=float)
+                slice_bc = tuple(slice(0, 1) if d == i else slice(None) for d in range(dim))
+                if bc_v[i][i][0]['a'] == 1.:
+                    # Neumann boundary at low face
+                    v_f_bc_low[:] = v_f[slice_bc]
+                else:
+                    # Dirichlet at low face
+                    # Neumann boundary at low face
+                    v_f_bc_low[:] = 2 * bc_v[i][i][0]['d'] - v_f[slice_bc]
+                slice_bc = list(slice_bc)
+                slice_bc[i] = slice(v_f.shape[i]-1, v_f.shape[i])
+                slice_bc = tuple(slice_bc)
+                if bc_v[i][i][1]['a'] == 1.:
+                    # Neumann boundary at low face
+                    v_f_bc_high[:] = v_f[slice_bc]
+                else:
+                    # Dirichlet at low face
+                    # Neumann boundary at low face
+                    v_f_bc_high[:] = 2 * bc_v[i][i][1]['d'] - v_f[slice_bc]
+                v_f = np.concatenate((v_f_bc_low, v_f, v_f_bc_high), axis=i)
+                # v_f = interp_stagg_to_cntr(v[j], x_f=x_cntr_f[i], x_c=x_cntr_c[i], axis=i)
+                # shape_v_f_bnd = list(v_f.shape)
+                # shape_v_f_bnd[j] = 1
+                # v_f = np.concatenate((np.zeros(shape_v_f_bnd), v_f, np.zeros(shape_v_f_bnd)), axis=j)
+                rho_vi_f, drho_vi_f = interp_cntr_to_stagg_tvd(rho_v[i]*v[i], x_cntr_f[j], x_cntr_c[j], bc_v[i][j], v_f, minmod, axis=j)
+                conv_flux = v_f * rho_vi_f
             g_conv = g_conv + Div_v[i][j] @ conv_flux.reshape(-1, 1)
 
         # Pressure contribution (explicit)
