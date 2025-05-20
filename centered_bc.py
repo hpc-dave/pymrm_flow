@@ -54,7 +54,7 @@ def apply_centered_bc(c: np.ndarray,
                       A: sp.spmatrix | None = None,
                       B: np.ndarray | None = None,
                       alg: str = 'Jacobian',
-                      format:str = 'csr'):
+                      format: str = 'csr'):
     r"""
     Application of centered boundary condition to Matrix and/or RHS
 
@@ -81,40 +81,38 @@ def apply_centered_bc(c: np.ndarray,
     if A is None and B is None:
         raise ValueError('Minimally A or G have to be specified')
 
-    mask = bc_param['mask']
-    if A is not None:
-        A_type = type(A)
-        A = A.tolil()          # need to convert to lil here for efficiency, otherwise we are directly manipulating the sparse matrix structure, which is expensive! # noqa: E501
-        A[mask, :] = 0         # setting the complete rows with prescribed pressure to 0
-        A += bc_param['diag']  # setting the main diagonal of the affected rows to 1
-        match format:
-            case 'csr':
-                A = sp.csr_matrix(A)
-            case 'csc':
-                A = sp.csc_matrix(A)
-            case 'coo':
-                A = sp.coo_matrix(A)
-            case 'lil':
-                # do nothing
-                A = A
-            case _:
-                raise ValueError(f'Unknown sparse matrix type: {format}')
+    if isinstance(bc_param, list):
+        for i in range(len(bc_param)):
+            A, B = apply_centered_bc(c=c, bc=bc[i], bc_param=bc_param[i], A=A, B=B, alg=alg, format=format)
+    else:
+        mask = bc_param['mask']
+        if A is not None:
+            A = A.tolil()          # need to convert to lil here for efficiency, otherwise we are directly manipulating the sparse matrix structure, which is expensive! # noqa: E501
+            A[mask, :] = 0         # setting the complete rows with prescribed pressure to 0
+            A += bc_param['diag'].tolil()  # setting the main diagonal of the affected rows to 1
+            match format:
+                case 'csr':
+                    A = sp.csr_matrix(A)
+                case 'csc':
+                    A = sp.csc_matrix(A)
+                case 'coo':
+                    A = sp.coo_matrix(A)
+                case 'lil':
+                    # do nothing
+                    A = A
+                case _:
+                    raise ValueError(f'Unknown sparse matrix type: {format}')
 
-    if B is not None:
-        match alg:
-            case 'Jacobian':
-                B[mask] = c.ravel()[mask] - bc['d']
-            case 'Direct':
-                B[mask] = bc['d']
-            case _:
-                raise ValueError(f'Unknown algorithm type: {alg}')
+        if B is not None:
+            match alg:
+                case 'Jacobian':
+                    B.ravel()[mask] = c.ravel()[mask] - bc['d']
+                case 'Direct':
+                    B.ravel()[mask] = bc['d']
+                case _:
+                    raise ValueError(f'Unknown algorithm type: {alg}')
 
-    if A is not None and B is not None:
-        return A, B
-    if A is not None:
-        return A
-    if B is not None:
-        return B
+    return A, B
 
 
 # c = np.linspace(0, 5, 6).reshape((2, -1))

@@ -16,8 +16,8 @@ rho = 1000            # density of the fluid
 mu = 1e-3                # viscosity of the fluid
 p_out = 0             # pressure at the outlet
 u_in, v_in = 0.1, 0.   # velocities at the inlet
-box   = [1., 0.05]     # size of the rectangular domain # noqa: E221
-l_cell = 0.001  # 0.1   # cell size (equidistant discretization here!)
+box   = [1., 1.]     # size of the rectangular domain # noqa: E221
+l_cell = 0.1  # 0.1   # cell size (equidistant discretization here!)
 rtol = 1e-14
 
 # Numerical Parameters
@@ -89,15 +89,17 @@ bc_v[dim_u][1] = ({'a': 1, 'b': 0, 'd': 0.}, {'a': 1, 'b': 0, 'd': 0.})
 bc_v[dim_v][1] = ({'a': 0, 'b': 1, 'd': 0}, {'a': 0, 'b': 1, 'd': 0.})
 bc_p[1] = ({'a': 1, 'b': 0, 'd': 0}, {'a': 1, 'b': 0, 'd': 0})
 
-# Preparation of the operators
 for i in range(dim):
-    Grad_p[i], grad_bc_p[i] = construct_grad(shape_p, x_cntr_f[i], x_cntr_c[i], bc_p[i], axis=i)
-    Div_p[i] = construct_div(shape_p, x_cntr_f[i], nu=0, axis=i)
     # BE AWARE: THOSE NEED TO BE UPDATED LATER FOR DYNAMIC SYSTEMS
     rho_v[i] = interp_cntr_to_stagg(rho_p, x_f=x_cntr_f[i], x_c=x_cntr_c[i], axis=i)
     mu_v[i] = interp_cntr_to_stagg(mu_p, x_f=x_cntr_f[i], x_c=x_cntr_c[i], axis=i)
     beta_v[i] = interp_cntr_to_stagg(beta_p, x_f=x_cntr_f[i], x_c=x_cntr_c[i], axis=i)
     prefac_p[i] = 1./(rho_v[i]/dt+beta_v[i])
+
+# Preparation of the operators
+for i in range(dim):
+    Grad_p[i], grad_bc_p[i] = construct_grad(shape_p, x_cntr_f[i], x_cntr_c[i], bc_p[i], axis=i)
+    Div_p[i] = construct_div(shape_p, x_cntr_f[i], nu=0, axis=i)
     Lapl_p = Lapl_p + Div_p[i] @ (prefac_p[i].reshape(-1, 1) * Grad_p[i])
     lapl_bc_p = lapl_bc_p + Div_p[i] @ (prefac_p[i].reshape(-1, 1) * grad_bc_p[i])
 
@@ -111,14 +113,19 @@ for i in range(dim):
         if (i == j):
             Grad_v[i][j], grad_bc_v[i][j] = construct_grad(shape_v[i], x_stagg_f[j], x_stagg_c[j], axis=j)
             Div_v[i][j] = construct_div(shape_v[i], x_stagg_f[j], nu=0, axis=j)
+            # mu_v_loc = mu_v[j]
+            mu_v_loc = np.asarray(mu)
         else:
             Grad_v[i][j], grad_bc_v[i][j] = construct_grad(shape_v[i], x_cntr_f[j], x_cntr_c[j], bc_v[i][j], axis=j)
             Div_v[i][j] = construct_div(shape_v[i], x_cntr_f[j], nu=0, axis=j)
-        Lapl_v[i] = Lapl_v[i] + Div_v[i][j] @ Grad_v[i][j]
-        lapl_bc_v[i] = lapl_bc_v[i] + Div_v[i][j] @ grad_bc_v[i][j]
-    Jac_v[i] = (rho/dt) * sp.sparse.eye(v[i].size, format='csc') - mu * Lapl_v[i]
-    Jac_v_ilu[i] = sla.spilu(Jac_v[i])
-    Jac_v_pc[i] = sla.LinearOperator(Jac_v_ilu[i].shape, lambda x: Jac_v_ilu[i].solve(x))
+            # mu_v_loc = mu_p
+            mu_v_loc = np.asarray(mu)
+        print('Be aware, visocsity is not yet a field, only a scalar!')
+        Lapl_v[i] = Lapl_v[i] + Div_v[i][j] @ (mu_v_loc.reshape(1, -1) * Grad_v[i][j])
+        lapl_bc_v[i] = lapl_bc_v[i] + Div_v[i][j] @ (mu_v_loc * grad_bc_v[i][j])
+    Jac_v[i] = sp.sparse.diags(rho_v[i].reshape(-1)/dt, format='csc').dot(sp.sparse.eye(v[i].size, format='csc')) - Lapl_v[i]
+    # Jac_v_ilu[i] = sla.spilu(Jac_v[i])
+    # Jac_v_pc[i] = sla.LinearOperator(Jac_v_ilu[i].shape, lambda x: Jac_v_ilu[i].solve(x))
 
 # Precompute centered boundary condition parameters
 bc_p_pre = compute_centered_bc(c=p, bc=bc_p[0][1], axis=0, boundary=1)
@@ -128,9 +135,14 @@ bc_v_pre[dim_u][1] = compute_centered_bc(c=v[dim_u], bc=bc_v[dim_u][0][1], axis=
 bc_v_pre[dim_v][0] = compute_centered_bc(c=v[dim_v], bc=bc_v[dim_v][1][0], axis=1, boundary=0)
 bc_v_pre[dim_v][1] = compute_centered_bc(c=v[dim_v], bc=bc_v[dim_v][1][1], axis=1, boundary=1)
 
+# enforce centered boundary condition for momentum
 
 # enforce the prescribed boundary condition
-Lapl_p = apply_centered_bc(c=p, bc=bc_p[dim_u][1], bc_param=bc_p_pre, A=Lapl_p)
+for d in range(dim):
+    Jac_v[d], _ = apply_centered_bc(c=v[d], bc=bc_v[d][d], bc_param=bc_v_pre[d], A=Jac_v[d])
+    Jac_v_ilu[d] = sla.spilu(Jac_v[d])
+    Jac_v_pc[d] = sla.LinearOperator(Jac_v_ilu[d].shape, lambda x: Jac_v_ilu[d].solve(x))
+Lapl_p, _ = apply_centered_bc(c=p, bc=bc_p[dim_u][1], bc_param=bc_p_pre, A=Lapl_p)
 Lapl_p_M = amg(Lapl_p).aspreconditioner(cycle='V')
 
 X, Y = np.meshgrid(x_cntr_c[0], x_cntr_c[1])
@@ -147,8 +159,10 @@ for k in range(num_time_steps):
         for j in range(dim):
             if (j == i):        # self-convection
                 v_f = interp_cntr_to_stagg(v[i], x_stagg_f[i], x_stagg_c[i], axis=i)
-                vi_f, dvi_f = interp_cntr_to_stagg_tvd(v[i], x_f=x_stagg_f[i], x_c=x_stagg_c[i], bc=bc_v[i][j], v=v_f, tvd_limiter=minmod, axis=j)   # noqa: E501
-                conv_flux = rho*vi_f*vi_f
+                vi_f, dvi_f = interp_cntr_to_stagg_tvd(rho_v[i]*v[i], x_f=x_stagg_f[i], x_c=x_stagg_c[i], bc=bc_v[i][j], v=v_f, tvd_limiter=minmod, axis=j)   # noqa: E501
+                rho_f, drho_f = interp_cntr_to_stagg_tvd(rho_v[i], x_f=x_stagg_f[i], x_c=x_stagg_c[i], bc=bc_v[i][j], v=v_f, tvd_limiter=minmod, axis=j)   # noqa: E501
+                # TODO: adapt rho staggered
+                conv_flux = rho_f*vi_f*vi_f
             else:               # regular convection
                 shape_bc_v = list(v[j].shape)
                 shape_bc_v[i] = 1
@@ -187,13 +201,20 @@ for k in range(num_time_steps):
         shape_p_f = shape_p.copy()
         shape_p_f[i] = shape_p[i]+1
         grad_p = (Grad_p[i] @ p.reshape(-1, 1) + grad_bc_p[i]).reshape(shape_p_f)
-        idx = [slice(None)] * dim
-        idx[i] = slice(1, shape_p_f[i]-1)
-        g_grad_p = grad_p[tuple(idx)].reshape(-1, 1)
+        # idx = [slice(None)] * dim
+        # idx[i] = slice(1, shape_p_f[i]-1)
+        # g_grad_p = grad_p[tuple(idx)].reshape(-1, 1)
+        g_grad_p = grad_p.reshape(-1, 1)
 
         # assemble contributions, with implicit stress contribution and Euler backward time stepping
-        g_v[i] = Jac_v[i] @ v[i].reshape(-1, 1) - (rho/dt)*v_old[i].reshape(-1, 1) + g_conv + g_grad_p - mu*lapl_bc_v[i]
+        # Note that this here is NOT conservative, should use density of the previous timestep
+        g_v[i] = Jac_v[i] @ v[i].reshape(-1, 1) - (rho_v[i].reshape(-1, 1)/dt)*v_old[i].reshape(-1, 1)\
+                + g_conv + g_grad_p - lapl_bc_v[i]  # noqa: E127
+        print('Warning, mu is only a scalar!')
 
+        _, g_v[i] = apply_centered_bc(c=v[i], bc=bc_v[i][i], bc_param=bc_v_pre[i], B=g_v[i])
+        # apply_centered_bc(c=v[i], bc=bc_v[i], bc_param=bc_v_pre[i][0], B=g_v)
+        # apply_centered_bc(c=v[i], bc=bc_v[i], bc_param=bc_v_pre[i][1], B=g_v)
         # solve and update velocity
         dv, exit_code = sla.bicgstab(Jac_v[i], g_v[i], M=Jac_v_pc[i], rtol=rtol)
         v[i] -= dv.reshape(shape_v[i])
@@ -202,7 +223,7 @@ for k in range(num_time_steps):
         div_v += Div_p[i] @ v[i].reshape(-1, 1)                                                # add contribution to defect  # noqa: E501
 
     # Apply Implicit Force Term
-    defect_continuity = apply_centered_bc(c=p, bc=bc_p, bc_param=bc_p_pre, B=div_v)
+    _, defect_continuity = apply_centered_bc(c=p, bc=bc_p, bc_param=bc_p_pre, B=div_v)
     dp, exit_code = sla.bicgstab(A=Lapl_p, b=-defect_continuity, M=Lapl_p_M, rtol=rtol)
     p += dp.reshape(shape_p)                            # update pressure
     # update velocities
@@ -218,7 +239,7 @@ for k in range(num_time_steps):
         div_v += Div_p[i] @ v[i].reshape(-1, 1)
 
     # Enforce continuity
-    defect_continuity = apply_centered_bc(c=p, bc=bc_p, bc_param=bc_p_pre, B=div_v)
+    _, defect_continuity = apply_centered_bc(c=p, bc=bc_p, bc_param=bc_p_pre, B=div_v)
     dp, exit_code = sla.bicgstab(A=Lapl_p, b=-defect_continuity, M=Lapl_p_M, rtol=rtol)
     p += dp.reshape(shape_p)                            # update pressure
     # update velocities
